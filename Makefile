@@ -36,14 +36,18 @@ export PATH
 PLUGIN_SUBMODULE := $(abspath $(DEPS_DIR)/plugin)
 export PLUGIN_SUBMODULE
 
+PYTHONPATH = $(K_LIB)
+export PYTHONPATH
+
 .PHONY: all clean distclean                                                                                                      \
         deps all-deps llvm-deps haskell-deps repo-deps k-deps plugin-deps libsecp256k1 libff                                     \
         build build-java build-specs build-haskell build-llvm                                                                    \
         test test-all test-conformance test-rest-conformance test-all-conformance test-slow-conformance test-failing-conformance \
         test-vm test-rest-vm test-all-vm test-bchain test-rest-bchain test-all-bchain                                            \
-        test-prove test-failing-prove                                                                                            \
+        test-prove test-failing-prove test-prove-lemmas                                                                          \
         test-prove-benchmarks test-prove-functional test-prove-opcodes test-prove-erc20 test-prove-bihu test-prove-examples      \
         test-prove-imp-specs test-prove-mcd test-klab-prove test-haskell-dry-run                                                 \
+        gen-lemma-proofs                                                                                                         \
         test-parse test-failure                                                                                                  \
         test-interactive test-interactive-help test-interactive-run test-interactive-prove test-interactive-search               \
         media media-pdf metropolis-theme
@@ -311,6 +315,12 @@ tests/%.prove: tests/%
 	$(TEST) prove $(TEST_OPTIONS) --backend $(TEST_SYMBOLIC_BACKEND) $< $(KPROVE_MODULE) --format-failures $(KPROVE_OPTS) \
 	    --concrete-rules $(shell cat $(dir $@)concrete-rules.txt | tr '\n' ',')
 
+tests/%.prove-no-trivial: tests/%
+	$(TEST) prove $(TEST_OPTIONS) --backend $(TEST_SYMBOLIC_BACKEND) $< $(KPROVE_MODULE) --format-failures $(KPROVE_OPTS) \
+	    --concrete-rules $(shell cat $(dir $@)concrete-rules.txt | tr '\n' ',')                                           \
+	    > $@.out-no-trivial 2>&1
+	! grep WarnTrivialClaim $@.out-no-trivial > /dev/null 2>&2
+
 tests/%.prove-dry-run: tests/%
 	$(TEST) prove $(TEST_OPTIONS) --backend haskell $< $(KPROVE_MODULE) --format-failures $(KPROVE_OPTS) --dry-run \
 	    --concrete-rules $(shell cat $(dir $@)concrete-rules.txt | tr '\n' ',')
@@ -328,6 +338,38 @@ tests/%.search: tests/%
 tests/%.klab-prove: tests/%
 	$(TEST) klab-prove $(TEST_OPTIONS) --backend $(TEST_SYMBOLIC_BACKEND) $< $(KPROVE_MODULE) --format-failures $(KPROVE_OPTS) \
 	    --concrete-rules $(shell cat $(dir $@)concrete-rules.txt | tr '\n' ',')
+
+PROVE_LEMMA_MODULES        =
+PROVE_LEMMA_MODULE_IMPORTS =
+PROVE_LEMMA_REQUIRES       =
+PROVE_LEMMA_DUMMY          =
+
+tests/specs/lemmas-lemmas/%: PROVE_LEMMA_MODULES        = LEMMAS,LEMMAS-HASKELL
+tests/specs/lemmas-lemmas/%: PROVE_LEMMA_MODULE_IMPORTS = INT-SYMBOLIC,EDSL,EVM
+tests/specs/lemmas-lemmas/%: PROVE_LEMMA_REQUIRES       = evm.md,edsl.md
+tests/specs/lemmas-lemmas/%: PROVE_LEMMA_DUMMY          = functional/lemmas-spec.k
+
+tests/specs/mcd/verification-lemmas/%: PROVE_LEMMA_MODULES        = VERIFICATION
+tests/specs/mcd/verification-lemmas/%: PROVE_LEMMA_MODULE_IMPORTS = LEMMAS,DSS-BIN-RUNTIME,DSS-STORAGE,HASH2,WORD-PACK,INFINITE-GAS
+tests/specs/mcd/verification-lemmas/%: PROVE_LEMMA_REQUIRES        = ../../lemmas.k,../bin_runtime.k,../storage.k,../../infinite-gas.k
+tests/specs/mcd/verification-lemmas/%: PROVE_LEMMA_DUMMY           = mcd/dai-adduu-fail-rough-spec.k
+
+PROVE_LEMMA_FILES = lemmas mcd/verification
+
+gen-lemma-proofs: $(patsubst %, tests/specs/%-lemmas/main-module.k,      $(PROVE_LEMMA_FILES)) \
+                  $(patsubst %, tests/specs/%-lemmas/concrete-rules.txt, $(PROVE_LEMMA_FILES))
+
+tests/specs/%-lemmas/main-module.k: tests/specs/%-lemmas/prove-definition.json
+	python3 pyk-prove-lemmas.py $< $(PROVE_LEMMA_MODULES) $(PROVE_LEMMA_REQUIRES) $(PROVE_LEMMA_MODULE_IMPORTS) $(dir $@)
+
+tests/specs/%-lemmas/prove-definition.json: tests/specs/%.k
+	@mkdir -p $(dir $@)
+	$(TEST) prove --backend haskell tests/specs/$(PROVE_LEMMA_DUMMY) $(KPROVE_MODULE) --emit-json --dry-run
+	mv .build/defn/haskell/driver-kompiled/prove-definition.json $@
+
+tests/specs/%-lemmas/concrete-rules.txt:
+	@mkdir -p $(dir $@)
+	echo 'EVM.step' > $@
 
 # Smoke Tests
 
@@ -381,6 +423,7 @@ prove_bihu_tests       := $(filter-out $(prove_failing_tests), $(wildcard $(prov
 prove_examples_tests   := $(filter-out $(prove_failing_tests), $(wildcard $(prove_specs_dir)/examples/*-spec.k))
 prove_imp_specs_tests  := $(filter-out $(prove_failing_tests), $(wildcard $(prove_specs_dir)/imp-specs/*-spec.k))
 prove_mcd_tests        := $(filter-out $(prove_failing_tests), $(wildcard $(prove_specs_dir)/mcd/*-spec.k))
+prove_lemmas_tests     := $(filter-out $(prove_failing_tests), $(wildcard $(prove_specs_dir)/lemmas-lemmas/*-spec.k) $(wildcard $(prove_specs_dir)/mcd/verification-lemmas/*-spec.k))
 
 test-prove: test-prove-benchmarks test-prove-functional test-prove-opcodes test-prove-erc20 test-prove-bihu test-prove-examples test-prove-imp-specs test-prove-mcd
 test-prove-benchmarks: $(prove_benchmarks_tests:=.prove)
@@ -391,6 +434,7 @@ test-prove-bihu:       $(prove_bihu_tests:=.prove)
 test-prove-examples:   $(prove_examples_tests:=.prove)
 test-prove-imp-specs:  $(prove_imp_specs_tests:=.prove)
 test-prove-mcd:        $(prove_mcd_tests:=.prove)
+test-prove-lemmas:     $(prove_lemmas_tests:=.prove-no-trivial)
 
 test-failing-prove: $(prove_failing_tests:=.prove)
 
